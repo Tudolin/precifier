@@ -1,0 +1,56 @@
+# =====================================================================
+# MODO PRODUCAO (para testar como vai ficar publicado, ainda na sua maquina)
+#
+#   docker compose -f docker-compose.prod.yml up --build
+#   Abra http://localhost:3000
+#
+# Aqui NAO ha recarregamento automatico: o site e compilado uma vez e
+# roda otimizado, igual ao que a Vercel serve.
+# =====================================================================
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: precifier-redis-prod
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-dados-prod:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+
+  kv:
+    image: hiett/serverless-redis-http:latest
+    container_name: precifier-kv-prod
+    environment:
+      SRH_MODE: env
+      SRH_TOKEN: ${KV_TOKEN:-token-local-de-teste}
+      SRH_CONNECTION_STRING: redis://redis:6379
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  app:
+    build:
+      context: .
+      target: runner
+    container_name: precifier-app-prod
+    ports:
+      - "${PORTA:-3000}:3000"
+    environment:
+      KV_REST_API_URL: http://kv:80
+      KV_REST_API_TOKEN: ${KV_TOKEN:-token-local-de-teste}
+      NEXTAUTH_URL: ${NEXTAUTH_URL:-http://localhost:${PORTA:-3000}}
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:-chave-de-teste-local-trocar-em-producao-1234567890}
+      USER_EMAIL: ${USER_EMAIL:-dono@minhamassa.com.br}
+      USER_PASSWORD: ${USER_PASSWORD:-massa123}
+    depends_on:
+      - kv
+    restart: unless-stopped
+
+volumes:
+  redis-dados-prod:

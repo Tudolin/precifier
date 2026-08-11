@@ -1,0 +1,17 @@
+node_modules
+**/node_modules
+.next
+out
+build
+.git
+.gitignore
+.vercel
+.env
+.env*.local
+.precifier-local.json
+npm-debug.log*
+*.tsbuildinfo
+README.md
+Dockerfile
+.dockerignore
+docker-compose*.yml

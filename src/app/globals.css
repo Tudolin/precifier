@@ -1,0 +1,35 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    /* Fonte um pouco maior que o padrao: mais confortavel de ler */
+    font-size: 17px;
+  }
+
+  body {
+    @apply bg-slate-50 text-slate-900 antialiased;
+  }
+
+  /* Remove as setinhas dos campos numericos (confundem mais do que ajudam) */
+  input[type="number"]::-webkit-outer-spin-button,
+  input[type="number"]::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+  input[type="number"] {
+    -moz-appearance: textfield;
+  }
+
+  /* Foco sempre visivel, para quem navega pelo teclado */
+  :focus-visible {
+    outline: none;
+  }
+}
+
+@layer utilities {
+  .esqueleto {
+    @apply animate-pulse rounded-lg bg-slate-200;
+  }
+}
