@@ -13,6 +13,7 @@ export default function FormularioLogin() {
   const [senha, setSenha] = useState("");
   const [mostrarSenha, setMostrarSenha] = useState(false);
   const [erro, setErro] = useState<string | null>(null);
+  const [problemaDeConfiguracao, setProblemaDeConfiguracao] = useState(false);
   const [carregando, setCarregando] = useState(false);
 
   async function entrar(evento: React.FormEvent) {
@@ -31,7 +32,17 @@ export default function FormularioLogin() {
     setCarregando(false);
 
     if (!resposta || resposta.error) {
-      setErro("Email ou senha não conferem. Tente de novo.");
+      /**
+       * O NextAuth devolve o texto do erro que o servidor lançou. Se for
+       * "CONFIGURACAO", o problema não é a senha do dono — é o sistema que
+       * ainda não foi configurado (banco ou variáveis de ambiente).
+       */
+      if (resposta?.error?.includes("CONFIGURACAO")) {
+        setProblemaDeConfiguracao(true);
+        setErro(null);
+      } else {
+        setErro("Email ou senha não conferem. Tente de novo.");
+      }
       return;
     }
 
@@ -109,6 +120,26 @@ export default function FormularioLogin() {
         >
           {erro}
         </p>
+      )}
+
+      {problemaDeConfiguracao && (
+        <div
+          role="alert"
+          className="mb-5 rounded-xl border-2 border-amber-300 bg-amber-50 px-4 py-4 text-base text-amber-900"
+        >
+          <p className="font-bold">O sistema ainda não está configurado</p>
+          <p className="mt-1 leading-snug">
+            Não é a sua senha. Falta ligar o banco de dados ou cadastrar as variáveis de ambiente.
+          </p>
+          <a
+            href="/api/diagnostico"
+            target="_blank"
+            rel="noreferrer"
+            className="mt-3 inline-block font-bold underline underline-offset-2"
+          >
+            Ver o que está faltando →
+          </a>
+        </div>
       )}
 
       <button type="submit" className={`${botaoPrimario} w-full`} disabled={carregando}>

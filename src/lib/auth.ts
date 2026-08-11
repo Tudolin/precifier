@@ -80,8 +80,27 @@ export const authOptions: NextAuthOptions = {
         const senha = credentials?.senha ?? "";
         if (!email || !senha) return null;
 
-        const usuario = await garantirUsuario();
-        if (!usuario) return null;
+        let usuario;
+        try {
+          usuario = await garantirUsuario();
+        } catch (erro) {
+          /**
+           * Aqui quase sempre significa "banco nao configurado" (tipico logo
+           * depois do primeiro deploy). Deixamos registrado no log da Vercel
+           * e devolvemos um erro diferente de "senha errada", para a tela
+           * poder mandar o dono conferir a configuracao.
+           */
+          console.error("[login] falha ao acessar o banco:", erro);
+          throw new Error("CONFIGURACAO");
+        }
+
+        if (!usuario) {
+          console.error(
+            "[login] USER_EMAIL/USER_PASSWORD não estão definidos e não há usuário no banco."
+          );
+          throw new Error("CONFIGURACAO");
+        }
+
         if (usuario.email !== email) return null;
 
         const senhaConfere = bcrypt.compareSync(senha, usuario.senhaHash);

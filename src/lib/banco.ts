@@ -31,9 +31,52 @@ const CHAVES = {
 
 const ARQUIVO_LOCAL = ".precifier-local.json";
 
-/** Existe Vercel KV configurado? */
+/**
+ * Descobre as credenciais do banco Redis.
+ *
+ * A Vercel aposentou o produto "Vercel KV" e passou a oferecer o Upstash
+ * pelo Marketplace — e essa integracao cria as variaveis com OUTROS nomes.
+ * Aceitamos os dois padroes para o projeto funcionar nos dois casos:
+ *
+ *   KV_REST_API_URL / KV_REST_API_TOKEN            (Vercel KV, formato antigo)
+ *   UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN  (Upstash, formato atual)
+ *   REDIS_REST_API_URL / REDIS_REST_API_TOKEN      (algumas integracoes usam este)
+ */
+export function credenciaisBanco(): { url: string; token: string } | null {
+  const url =
+    process.env.KV_REST_API_URL ||
+    process.env.UPSTASH_REDIS_REST_URL ||
+    process.env.REDIS_REST_API_URL;
+
+  const token =
+    process.env.KV_REST_API_TOKEN ||
+    process.env.UPSTASH_REDIS_REST_TOKEN ||
+    process.env.REDIS_REST_API_TOKEN;
+
+  if (!url || !token) return null;
+  return { url, token };
+}
+
+/** Existe banco Redis configurado? */
 function temKV(): boolean {
-  return Boolean(process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN);
+  return credenciaisBanco() !== null;
+}
+
+/** Estamos rodando na Vercel (ou em outro servidor de verdade)? */
+function emProducao(): boolean {
+  return Boolean(process.env.VERCEL || process.env.NODE_ENV === "production");
+}
+
+/** Erro com explicacao pronta, para o dono entender o que falta. */
+export class BancoNaoConfigurado extends Error {
+  constructor() {
+    super(
+      "O banco de dados não está configurado. Na Vercel, crie um Redis em " +
+        "Storage → Create Database → Marketplace → Upstash, conecte ao projeto " +
+        "e faça um novo deploy."
+    );
+    this.name = "BancoNaoConfigurado";
+  }
 }
 
 // ---------------------------------------------------------------------
@@ -88,10 +131,13 @@ let clienteKV: ClienteKV | null = null;
 async function obterCliente(): Promise<ClienteKV> {
   if (clienteKV) return clienteKV;
 
+  const credenciais = credenciaisBanco();
+  if (!credenciais) throw new BancoNaoConfigurado();
+
   const { createClient } = await import("@vercel/kv");
   clienteKV = createClient({
-    url: process.env.KV_REST_API_URL as string,
-    token: process.env.KV_REST_API_TOKEN as string,
+    url: credenciais.url,
+    token: credenciais.token,
     // <- a linha que impede o Next de guardar as leituras do banco
     cache: "no-store",
   }) as unknown as ClienteKV;
@@ -105,6 +151,10 @@ async function obter<T>(chave: string, padrao: T): Promise<T> {
     const valor = await kv.get<T>(chave);
     return valor ?? padrao;
   }
+  // Em producao NAO ha arquivo para gravar (o disco da Vercel e somente
+  // leitura). Melhor falhar com uma explicacao do que fingir que salvou.
+  if (emProducao()) throw new BancoNaoConfigurado();
+
   const dados = await lerArquivoLocal();
   return (dados[chave] as T) ?? padrao;
 }
@@ -115,6 +165,8 @@ async function gravar<T>(chave: string, valor: T): Promise<void> {
     await kv.set(chave, valor);
     return;
   }
+  if (emProducao()) throw new BancoNaoConfigurado();
+
   await gravarArquivoLocal(chave, valor);
 }
 
