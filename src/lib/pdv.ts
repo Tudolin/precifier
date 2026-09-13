@@ -18,6 +18,19 @@
  * chaves. O bridge do pdv_database.db continua existindo -- ele so deixa de
  * ser a UNICA fonte, e o precifier passa a valer tambem.
  *
+ * DOIS PUBLICADORES NO MESMO CATALOGO -- CUIDADO AO MEXER AQUI:
+ * `scripts/publicar_catalogo.py` (Python, le pdv_database.db) continua
+ * publicando os produtos que NENHUM prato daqui ainda referencia. Esta
+ * funcao NUNCA PODE tratar `produto:*`/`produto_ean:*`/`catalogo:snapshot`
+ * como propriedade exclusiva dela -- uma versao anterior fazia isso
+ * (sobrescrevia o snapshot inteiro so com os pratos daqui, e apagava toda
+ * chave que nao estivesse na lista atual) e isso APAGOU o catalogo inteiro
+ * publicado pelo script Python na primeira vez que rodou com poucos pratos
+ * vinculados. A regra agora e: mesclar com o que ja esta no Redis, e so
+ * apagar/sobrescrever entradas que O PROPRIO precifier publicou antes (
+ * rastreado em `precifier:pdv_publicados`) -- nunca uma entrada de origem
+ * desconhecida.
+ *
  * MELHOR ESFORCO, DE PROPOSITO: o cadastro no precifier ja foi gravado antes
  * de chegar aqui. Se o Redis estiver fora do ar, ou sem credenciais (modo
  * local de desenvolvimento), essa funcao so devolve um aviso -- nunca desfaz
@@ -31,6 +44,8 @@ const PREFIXO_PRODUTO = "produto:";
 const PREFIXO_PRODUTO_EAN = "produto_ean:";
 const CHAVE_SNAPSHOT = "catalogo:snapshot";
 const CHAVE_VERSAO = "catalogo:versao";
+/** O que O PROPRIO precifier publicou da ultima vez -- nunca o catalogo inteiro. */
+const CHAVE_PUBLICADOS = "precifier:pdv_publicados";
 
 /** Documento gravado em `produto:{plu}` / `produto_ean:{codigo}`.
  *
@@ -45,6 +60,16 @@ interface DocumentoProduto {
   categoria: string;
   ativo: boolean;
 }
+
+interface Publicados {
+  plus: number[];
+  eans: string[];
+}
+
+/** Formato flexivel: aceita tanto o que o precifier grava (precoVenda)
+ * quanto o que publicar_catalogo.py grava (preco_kg/preco_fixo), sem
+ * precisar entender tudo -- so precisamos preservar o que ja esta la. */
+type DocumentoBruto = Record<string, unknown>;
 
 export interface ItemIgnorado {
   nome: string;
@@ -61,13 +86,8 @@ export interface ResultadoSincronizacaoPdv {
 }
 
 /**
- * Publica no Redis do PDV todo prato com `plu` OU `codigoBarras`.
- *
- * Sempre publica a lista INTEIRA (nao so o item que acabou de mudar): o
- * catalogo do PDV e pequeno (a casa das massas tem ~150 produtos), entao
- * republicar tudo a cada gravacao e simples e correto -- inclusive porque
- * assim um PLU removido de um prato (ou o prato inteiro excluido) some do
- * catalogo do caixa tambem, sem precisar de um passo de limpeza separado.
+ * Publica no Redis do PDV todo prato com `plu` OU `codigoBarras`, SEM
+ * mexer no que outra fonte (o script Python) publicou la.
  */
 export async function sincronizarComPdv(
   pratos: Prato[],
@@ -83,8 +103,8 @@ export async function sincronizarComPdv(
   const ignorados: ItemIgnorado[] = [];
   const plusVistos = new Set<number>();
   const codigosVistos = new Set<string>();
-  const porPeso: { plu: number; doc: DocumentoProduto }[] = [];
-  const porUnidade: { codigo: string; doc: DocumentoProduto }[] = [];
+  const porPeso = new Map<number, DocumentoProduto>();
+  const porUnidade = new Map<string, DocumentoProduto>();
 
   for (const prato of pratos) {
     const temPlu = prato.plu !== undefined && prato.plu !== null;
@@ -117,7 +137,7 @@ export async function sincronizarComPdv(
         continue;
       }
       plusVistos.add(plu);
-      porPeso.push({ plu, doc });
+      porPeso.set(plu, doc);
     } else {
       const codigo = (prato.codigoBarras as string).trim();
       if (codigosVistos.has(codigo)) {
@@ -128,57 +148,97 @@ export async function sincronizarComPdv(
         continue;
       }
       codigosVistos.add(codigo);
-      porUnidade.push({ codigo, doc });
+      porUnidade.set(codigo, doc);
     }
   }
 
   try {
     const { createClient } = await import("@vercel/kv");
     // "no-store" pela mesma razao de banco.ts: sem isso, o Next guardaria a
-    // leitura de CHAVE_VERSAO em cache e a proxima publicacao poderia achar
-    // uma versao velha e recomecar a numeracao do lugar errado.
+    // leitura em cache e a proxima publicacao poderia agir sobre dado velho.
     const kv = createClient({ ...credenciais, cache: "no-store" });
 
-    // 1) Cada produto na sua propria chave (formato "chave a chave" do PDV).
-    const escrita = kv.pipeline();
-    for (const item of porPeso) escrita.set(`${PREFIXO_PRODUTO}${item.plu}`, item.doc);
-    for (const item of porUnidade) escrita.set(`${PREFIXO_PRODUTO_EAN}${item.codigo}`, item.doc);
-    if (porPeso.length + porUnidade.length > 0) await escrita.exec();
+    // 1) O que o PROPRIO precifier publicou da ultima vez -- e SO isso que
+    // esta funcao tem autoridade para apagar ou substituir por completo.
+    const publicadosAntes = (await kv.get<Publicados>(CHAVE_PUBLICADOS)) || {
+      plus: [],
+      eans: [],
+    };
 
-    // 2) Limpa chaves de produtos que nao existem mais (excluidos, ou que
-    // perderam o PLU/codigo desde a ultima publicacao). Lista pequena (uma
-    // casa de massas tem dezenas/poucas centenas de produtos): um `keys()`
-    // aqui e simples e rapido, sem precisar do cursor de SCAN que o script
-    // Python usa para um Redis de producao generico.
-    const [chavesPeso, chavesEan] = await Promise.all([
-      kv.keys(`${PREFIXO_PRODUTO}*`),
-      kv.keys(`${PREFIXO_PRODUTO_EAN}*`),
-    ]);
-    const atuais = new Set([
-      ...Array.from(plusVistos, (plu) => `${PREFIXO_PRODUTO}${plu}`),
-      ...Array.from(codigosVistos, (codigo) => `${PREFIXO_PRODUTO_EAN}${codigo}`),
-    ]);
-    const sobrando = [...chavesPeso, ...chavesEan].filter((chave) => !atuais.has(chave));
-    if (sobrando.length > 0) {
+    // Nada vinculado agora e nada vinculado antes: nao ha o que gravar nem
+    // limpar. Sai sem tocar em catalogo:versao -- sem isso, salvar um prato
+    // que nunca teve plu/codigo faria o PDV inteiro redownloadar o catalogo
+    // a toa a cada gravacao.
+    if (
+      porPeso.size === 0 &&
+      porUnidade.size === 0 &&
+      publicadosAntes.plus.length === 0 &&
+      publicadosAntes.eans.length === 0
+    ) {
+      return { pulou: false, publicados: 0, ignorados };
+    }
+
+    // 2) Grava (upsert) cada produto atual na sua propria chave. Isso NUNCA
+    // apaga nada -- so cria/atualiza as chaves dos pratos vinculados agora.
+    const escrita = kv.pipeline();
+    porPeso.forEach((doc, plu) => escrita.set(`${PREFIXO_PRODUTO}${plu}`, doc));
+    porUnidade.forEach((doc, codigo) => escrita.set(`${PREFIXO_PRODUTO_EAN}${codigo}`, doc));
+    if (porPeso.size + porUnidade.size > 0) await escrita.exec();
+
+    // 3) SO remove uma chave individual se: (a) o precifier a publicou da
+    // ultima vez, E (b) ela nao esta mais na lista atual -- ou seja, o
+    // prato correspondente perdeu o plu/codigo ou foi excluido. Uma chave
+    // que o precifier nunca publicou (origem: script Python) jamais e
+    // tocada aqui, mesmo que nao apareca na lista atual.
+    const plusQueSaíram = publicadosAntes.plus.filter((plu) => !porPeso.has(plu));
+    const eansQueSaíram = publicadosAntes.eans.filter((codigo) => !porUnidade.has(codigo));
+    if (plusQueSaíram.length + eansQueSaíram.length > 0) {
       const limpeza = kv.pipeline();
-      for (const chave of sobrando) limpeza.del(chave);
+      for (const plu of plusQueSaíram) limpeza.del(`${PREFIXO_PRODUTO}${plu}`);
+      for (const codigo of eansQueSaíram) limpeza.del(`${PREFIXO_PRODUTO_EAN}${codigo}`);
       await limpeza.exec();
     }
 
-    // 3) Snapshot de chave unica: e o formato que o PDV prefere (1
-    // requisicao para sincronizar em vez de 1 SCAN + N GETs).
+    // 4) Snapshot de chave unica: MESCLA com o que ja estava la (produtos
+    // publicados pelo script Python, ou por uma sincronizacao anterior
+    // deste mesmo precifier) -- nunca sobrescreve com so o subconjunto
+    // atual. Comeca do snapshot existente, tira o que saiu (passo 3) e
+    // aplica por cima o que o precifier publica agora.
+    const snapshotAtual = await kv.get<{
+      produtos?: DocumentoBruto[];
+      eans?: DocumentoBruto[];
+    }>(CHAVE_SNAPSHOT);
+
+    const produtosMesclados = new Map<number, DocumentoBruto>();
+    for (const item of snapshotAtual?.produtos ?? []) {
+      const plu = Number(item.plu);
+      if (Number.isFinite(plu) && !plusQueSaíram.includes(plu)) produtosMesclados.set(plu, item);
+    }
+    porPeso.forEach((doc, plu) => produtosMesclados.set(plu, { plu, ...doc }));
+
+    const eansMesclados = new Map<string, DocumentoBruto>();
+    for (const item of snapshotAtual?.eans ?? []) {
+      const codigo = String(item.codigo ?? "");
+      if (codigo && !eansQueSaíram.includes(codigo)) eansMesclados.set(codigo, item);
+    }
+    porUnidade.forEach((doc, codigo) => eansMesclados.set(codigo, { codigo, ...doc }));
+
     const novaVersao = ((await kv.get<number>(CHAVE_VERSAO)) || 0) + 1;
     await kv.set(CHAVE_SNAPSHOT, {
       versao: String(novaVersao),
-      produtos: porPeso.map((item) => ({ plu: item.plu, ...item.doc })),
-      eans: porUnidade.map((item) => ({ codigo: item.codigo, ...item.doc })),
+      produtos: Array.from(produtosMesclados.values()),
+      eans: Array.from(eansMesclados.values()),
     });
+    await kv.set(CHAVE_PUBLICADOS, {
+      plus: Array.from(porPeso.keys()),
+      eans: Array.from(porUnidade.keys()),
+    } satisfies Publicados);
     // A versao vai por ULTIMO de proposito (mesma logica do
     // publicar_catalogo.py): se algo falhar no meio, o PDV nunca ve uma
     // versao nova com catalogo pela metade.
     await kv.set(CHAVE_VERSAO, novaVersao);
 
-    return { pulou: false, publicados: porPeso.length + porUnidade.length, ignorados };
+    return { pulou: false, publicados: porPeso.size + porUnidade.size, ignorados };
   } catch (erro) {
     return {
       pulou: false,
