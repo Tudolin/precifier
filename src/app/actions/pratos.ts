@@ -4,9 +4,10 @@
  * Acoes de gravacao dos PRATOS (fichas tecnicas).
  */
 
-import { gravarPratos, listarInsumos, listarPratos } from "@/lib/banco";
+import { gravarPratos, listarCategorias, listarInsumos, listarPratos } from "@/lib/banco";
 import { custoDeInsumosDoPrato } from "@/lib/calculos";
 import { novoId } from "@/lib/formatar";
+import { sincronizarComPdv } from "@/lib/pdv";
 import { exigirLogin, revalidarTudo } from "@/lib/servico";
 import type { IngredienteReceita, Prato, Resultado, Unidade } from "@/lib/types";
 import { UNIDADES_RENDIMENTO } from "@/lib/types";
@@ -16,9 +17,25 @@ export interface DadosPrato {
   nome: string;
   categoriaId?: string;
   precoVenda: number;
+  /** PLU da balanca, se este prato for vendido por peso no PDV. */
+  plu?: number;
+  /** Codigo de barras, se este prato for vendido por unidade no PDV. */
+  codigoBarras?: string;
   rendimento: number;
   unidadeRendimento: string;
   ingredientes: IngredienteReceita[];
+}
+
+/** Mensagem extra sobre a sincronizacao com o PDV, para anexar ao retorno. */
+function sufixoSincronizacao(resultado: Awaited<ReturnType<typeof sincronizarComPdv>>): string {
+  if (resultado.pulou) return "";
+  if (resultado.erro) return ` (não deu para avisar o caixa agora: ${resultado.erro})`;
+  if (resultado.ignorados.length > 0) {
+    return ` (caixa atualizado, mas ${resultado.ignorados.length} ${
+      resultado.ignorados.length === 1 ? "produto não sincronizou" : "produtos não sincronizaram"
+    } — confira PLU/código de barras duplicado)`;
+  }
+  return "";
 }
 
 export async function salvarPrato(dados: DadosPrato): Promise<Resultado> {
@@ -50,8 +67,21 @@ export async function salvarPrato(dados: DadosPrato): Promise<Resultado> {
   if (dados.ingredientes.some((i) => !Number.isFinite(i.quantidade) || i.quantidade <= 0)) {
     return { ok: false, mensagem: "Opa! A quantidade precisa ser um número positivo." };
   }
+  if (dados.plu !== undefined && dados.codigoBarras) {
+    return {
+      ok: false,
+      mensagem: "Opa! Escolha só um: PLU (venda por peso) OU código de barras (por unidade).",
+    };
+  }
+  if (dados.plu !== undefined && (!Number.isInteger(dados.plu) || dados.plu < 0 || dados.plu > 9999)) {
+    return { ok: false, mensagem: "Opa! O PLU da balança precisa ser um número inteiro de 0 a 9999." };
+  }
 
-  const [insumos, pratos] = await Promise.all([listarInsumos(), listarPratos()]);
+  const [insumos, pratos, categorias] = await Promise.all([
+    listarInsumos(),
+    listarPratos(),
+    listarCategorias(),
+  ]);
 
   const nome = dados.nome.trim();
   const id = dados.id || novoId();
@@ -61,6 +91,27 @@ export async function salvarPrato(dados: DadosPrato): Promise<Resultado> {
   );
   if (nomeRepetido) {
     return { ok: false, mensagem: `Você já tem um prato chamado "${nome}".` };
+  }
+
+  const codigoBarras = dados.codigoBarras?.trim() || undefined;
+
+  if (dados.plu !== undefined) {
+    const pluRepetido = pratos.find((p) => p.id !== id && p.plu === dados.plu);
+    if (pluRepetido) {
+      return {
+        ok: false,
+        mensagem: `O PLU ${dados.plu} já está usado no prato "${pluRepetido.nome}".`,
+      };
+    }
+  }
+  if (codigoBarras) {
+    const codigoRepetido = pratos.find((p) => p.id !== id && p.codigoBarras === codigoBarras);
+    if (codigoRepetido) {
+      return {
+        ok: false,
+        mensagem: `O código de barras ${codigoBarras} já está usado no prato "${codigoRepetido.nome}".`,
+      };
+    }
   }
 
   // O custo dos insumos e sempre calculado NO SERVIDOR, nunca vem do navegador.
@@ -74,6 +125,8 @@ export async function salvarPrato(dados: DadosPrato): Promise<Resultado> {
     // Vazio vira undefined: o produto fica "sem categoria"
     categoriaId: dados.categoriaId || undefined,
     precoVenda: dados.precoVenda,
+    plu: dados.plu,
+    codigoBarras,
     ingredientes: dados.ingredientes,
     rendimento: dados.rendimento,
     unidadeRendimento: dados.unidadeRendimento as Unidade,
@@ -88,10 +141,13 @@ export async function salvarPrato(dados: DadosPrato): Promise<Resultado> {
 
   await gravarPratos(novaLista);
   await revalidarTudo();
+  const sincronizacao = await sincronizarComPdv(novaLista, categorias);
 
   return {
     ok: true,
-    mensagem: existe ? `"${nome}" foi atualizado!` : `"${nome}" foi cadastrado!`,
+    mensagem:
+      (existe ? `"${nome}" foi atualizado!` : `"${nome}" foi cadastrado!`) +
+      sufixoSincronizacao(sincronizacao),
   };
 }
 
@@ -100,12 +156,16 @@ export async function excluirPrato(id: string): Promise<Resultado> {
     return { ok: false, mensagem: "Sua sessão expirou. Entre novamente, por favor." };
   }
 
-  const pratos = await listarPratos();
+  const [pratos, categorias] = await Promise.all([listarPratos(), listarCategorias()]);
   const alvo = pratos.find((p) => p.id === id);
   if (!alvo) return { ok: false, mensagem: "Esse prato não foi encontrado." };
 
-  await gravarPratos(pratos.filter((p) => p.id !== id));
+  const novaLista = pratos.filter((p) => p.id !== id);
+  await gravarPratos(novaLista);
   await revalidarTudo();
+  // Republica sem o item excluido -- e o que tira o PLU/codigo dele do
+  // catalogo do caixa (ver o comentario no topo de sincronizarComPdv).
+  await sincronizarComPdv(novaLista, categorias);
 
   return { ok: true, mensagem: `"${alvo.nome}" foi excluído.` };
 }
@@ -123,7 +183,7 @@ export async function atualizarPrecoVenda(id: string, precoVenda: number): Promi
     return { ok: false, mensagem: "Opa! O preço precisa ser um número positivo." };
   }
 
-  const pratos = await listarPratos();
+  const [pratos, categorias] = await Promise.all([listarPratos(), listarCategorias()]);
   const alvo = pratos.find((p) => p.id === id);
   if (!alvo) return { ok: false, mensagem: "Esse prato não foi encontrado." };
 
@@ -133,6 +193,9 @@ export async function atualizarPrecoVenda(id: string, precoVenda: number): Promi
 
   await gravarPratos(novaLista);
   await revalidarTudo();
+  // Esta e a edicao rapida usada no dia a dia (preco direto na tabela) --
+  // e a que mais precisa chegar no caixa na hora.
+  const sincronizacao = await sincronizarComPdv(novaLista, categorias);
 
-  return { ok: true, mensagem: `Preço de "${alvo.nome}" salvo!` };
+  return { ok: true, mensagem: `Preço de "${alvo.nome}" salvo!` + sufixoSincronizacao(sincronizacao) };
 }

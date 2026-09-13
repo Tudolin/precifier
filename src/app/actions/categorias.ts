@@ -7,6 +7,7 @@
 
 import { gravarCategorias, gravarPratos, listarCategorias, listarPratos } from "@/lib/banco";
 import { normalizarTexto, novoId } from "@/lib/formatar";
+import { sincronizarComPdv } from "@/lib/pdv";
 import { exigirLogin, revalidarTudo } from "@/lib/servico";
 import { CATEGORIAS_SUGERIDAS, CORES_CATEGORIA, type Categoria, type Resultado } from "@/lib/types";
 
@@ -63,15 +64,18 @@ export async function excluirCategoria(id: string): Promise<Resultado> {
   const alvo = categorias.find((c) => c.id === id);
   if (!alvo) return { ok: false, mensagem: "Essa categoria não foi encontrada." };
 
-  await gravarCategorias(categorias.filter((c) => c.id !== id));
+  const categoriasRestantes = categorias.filter((c) => c.id !== id);
+  await gravarCategorias(categoriasRestantes);
 
   // Os produtos NAO sao excluidos: apenas ficam sem categoria.
   const pratos = await listarPratos();
   const soltos = pratos.filter((p) => p.categoriaId === id).length;
   if (soltos > 0) {
-    await gravarPratos(
-      pratos.map((p) => (p.categoriaId === id ? { ...p, categoriaId: undefined } : p))
+    const novaLista = pratos.map((p) =>
+      p.categoriaId === id ? { ...p, categoriaId: undefined } : p
     );
+    await gravarPratos(novaLista);
+    await sincronizarComPdv(novaLista, categoriasRestantes);
   }
 
   await revalidarTudo();
@@ -93,14 +97,16 @@ export async function definirCategoriaDoPrato(
     return { ok: false, mensagem: "Sua sessão expirou. Entre novamente, por favor." };
   }
 
-  const pratos = await listarPratos();
+  const [pratos, categorias] = await Promise.all([listarPratos(), listarCategorias()]);
   const alvo = pratos.find((p) => p.id === pratoId);
   if (!alvo) return { ok: false, mensagem: "Esse produto não foi encontrado." };
 
-  await gravarPratos(
-    pratos.map((p) => (p.id === pratoId ? { ...p, categoriaId: categoriaId || undefined } : p))
+  const novaLista = pratos.map((p) =>
+    p.id === pratoId ? { ...p, categoriaId: categoriaId || undefined } : p
   );
+  await gravarPratos(novaLista);
   await revalidarTudo();
+  await sincronizarComPdv(novaLista, categorias);
 
   return { ok: true, mensagem: `Categoria de "${alvo.nome}" atualizada!` };
 }
@@ -138,7 +144,8 @@ export async function classificarAutomaticamente(): Promise<Resultado> {
     novas.push(criada);
   }
 
-  if (novas.length > 0) await gravarCategorias([...categorias, ...novas]);
+  const categoriasFinais = novas.length > 0 ? [...categorias, ...novas] : categorias;
+  if (novas.length > 0) await gravarCategorias(categoriasFinais);
 
   // 2) Distribui os produtos que ainda estão sem categoria
   let classificados = 0;
@@ -158,6 +165,7 @@ export async function classificarAutomaticamente(): Promise<Resultado> {
 
   await gravarPratos(atualizados);
   await revalidarTudo();
+  if (classificados > 0) await sincronizarComPdv(atualizados, categoriasFinais);
 
   if (classificados === 0) {
     return { ok: false, mensagem: "Todos os seus produtos já estão organizados em categorias." };

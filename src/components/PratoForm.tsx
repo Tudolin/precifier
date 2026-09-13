@@ -68,6 +68,11 @@ export default function PratoForm({
 }: Props) {
   const [nome, setNome] = useState(prato?.nome ?? "");
   const [categoriaId, setCategoriaId] = useState(prato?.categoriaId ?? "");
+  const [tipoPdv, setTipoPdv] = useState<"nenhum" | "peso" | "unidade">(
+    prato?.plu !== undefined ? "peso" : prato?.codigoBarras ? "unidade" : "nenhum"
+  );
+  const [pluTexto, setPluTexto] = useState(prato?.plu !== undefined ? String(prato.plu) : "");
+  const [codigoBarrasTexto, setCodigoBarrasTexto] = useState(prato?.codigoBarras ?? "");
   const [precoVendaTexto, setPrecoVendaTexto] = useState(paraCampo(prato?.precoVenda));
   const [rendimentoTexto, setRendimentoTexto] = useState(paraCampo(prato?.rendimento, 3) || "1");
   const [unidadeRendimento, setUnidadeRendimento] = useState<Unidade>(
@@ -174,12 +179,31 @@ export default function PratoForm({
       return;
     }
 
+    let plu: number | undefined;
+    let codigoBarras: string | undefined;
+    if (tipoPdv === "peso") {
+      const numero = Number(pluTexto.trim());
+      if (pluTexto.trim() === "" || !Number.isInteger(numero) || numero < 0 || numero > 9999) {
+        toast.error("Opa! O PLU da balança precisa ser um número inteiro de 0 a 9999.");
+        return;
+      }
+      plu = numero;
+    } else if (tipoPdv === "unidade") {
+      if (!codigoBarrasTexto.trim()) {
+        toast.error("Opa! Informe o código de barras do produto.");
+        return;
+      }
+      codigoBarras = codigoBarrasTexto.trim();
+    }
+
     setSalvando(true);
     const resultado = await salvarPrato({
       id: prato?.id,
       nome,
       categoriaId,
       precoVenda: paraNumero(precoVendaTexto),
+      plu,
+      codigoBarras,
       rendimento: paraNumero(rendimentoTexto),
       unidadeRendimento,
       ingredientes,
@@ -237,6 +261,59 @@ export default function PratoForm({
             </p>
           )}
         </div>
+      </div>
+
+      {/* ---------- Ligação com o caixa (PDV) ---------- */}
+      <div className="mb-7 rounded-2xl border-2 border-slate-200 p-5">
+        <label htmlFor="tipo-pdv" className="mb-1.5 block text-lg font-bold text-slate-900">
+          Este prato é vendido no caixa?
+          <Dica texto="Se sim, o preço daqui é enviado automaticamente para o PDV (o sistema do caixa) toda vez que você salvar. Sem PLU nem código de barras, este prato fica só no cálculo de custo, sem afetar o caixa." />
+        </label>
+        <select
+          id="tipo-pdv"
+          className={`${campo} max-w-sm`}
+          value={tipoPdv}
+          onChange={(e) => setTipoPdv(e.target.value as typeof tipoPdv)}
+          disabled={salvando}
+        >
+          <option value="nenhum">Não — é só cálculo interno</option>
+          <option value="peso">Sim, por peso (tem PLU na balança)</option>
+          <option value="unidade">Sim, por unidade (tem código de barras)</option>
+        </select>
+
+        {tipoPdv === "peso" && (
+          <div className="mt-4 max-w-xs">
+            <label htmlFor="plu-prato" className={rotulo}>
+              PLU da balança (0 a 9999)
+            </label>
+            <input
+              id="plu-prato"
+              inputMode="numeric"
+              className={campo}
+              placeholder="Ex: 12"
+              value={pluTexto}
+              onChange={(e) => setPluTexto(e.target.value.replace(/[^0-9]/g, ""))}
+              disabled={salvando}
+            />
+          </div>
+        )}
+
+        {tipoPdv === "unidade" && (
+          <div className="mt-4 max-w-xs">
+            <label htmlFor="codigo-barras-prato" className={rotulo}>
+              Código de barras
+            </label>
+            <input
+              id="codigo-barras-prato"
+              inputMode="numeric"
+              className={campo}
+              placeholder="Ex: 7894900027013"
+              value={codigoBarrasTexto}
+              onChange={(e) => setCodigoBarrasTexto(e.target.value.replace(/[^0-9]/g, ""))}
+              disabled={salvando}
+            />
+          </div>
+        )}
       </div>
 
       {/* ---------- Rendimento da receita ---------- */}

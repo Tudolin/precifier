@@ -121,6 +121,20 @@ export interface Prato {
   categoriaId?: string;
   /** Preco cobrado por UMA unidade vendida (uma coxinha, um quilo...). */
   precoVenda: number;
+  /**
+   * PLU da balanca (0-9999), SE este prato for vendido por peso no PDV.
+   * Preenchido = o preco daqui e publicado em `produto:{plu}` no Redis do
+   * PDV a cada gravacao (ver `src/lib/pdv.ts`). Mutuamente exclusivo com
+   * `codigoBarras`: um prato ou e pesado na balanca, ou tem etiqueta de
+   * codigo de barras -- nunca os dois.
+   */
+  plu?: number;
+  /**
+   * Codigo de barras (EAN), SE este prato for vendido por unidade no PDV
+   * (ex.: uma bebida de prateleira). Preenchido = publicado em
+   * `produto_ean:{codigo}`. Ver `plu` acima.
+   */
+  codigoBarras?: string;
   ingredientes: IngredienteReceita[];
   /**
    * Quanto a receita inteira rende. Ex.: 10 (coxinhas) ou 1 (kg de macarrao).
