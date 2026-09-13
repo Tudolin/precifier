@@ -368,3 +368,35 @@ Vercel. Sem elas, o sistema tenta gravar em arquivo — e na Vercel esse arquivo
 
 **Quero mais de um usuário.** O sistema foi feito para um único dono. Vários usuários exigiriam
 mudar `src/lib/auth.ts` e `src/lib/banco.ts`.
+
+---
+
+## 8. Sincronização com o PDV (caixa)
+
+O PDV (`cadasmassas_pdv`) lê produtos do **mesmo Redis** deste sistema, quando os dois
+projetos são configurados com as mesmas credenciais (`KV_REST_API_URL`/`KV_REST_API_TOKEN` ou
+os equivalentes `UPSTASH_REDIS_REST_*`) — mas em chaves diferentes das que "Meus Pratos" usa.
+
+Para um prato aparecer e vender pelo preço certo no caixa, edite-o e responda "Este prato é
+vendido no caixa?":
+
+- **Por peso** → informe o **PLU da balança** (0 a 9999).
+- **Por unidade** (ex.: uma bebida) → informe o **código de barras**.
+- **Não** (padrão) → o prato fica só no cálculo de custo/margem, sem afetar o caixa.
+
+A partir daí, **toda vez que o prato for salvo** (inclusive a edição rápida de preço direto na
+tabela do dashboard), o preço é publicado automaticamente nas chaves que o PDV lê
+(`produto:{plu}` / `produto_ean:{código}` / `catalogo:snapshot` / `catalogo:versao` — ver
+`src/lib/pdv.ts` e, no outro repositório, a seção 4 do README e `scripts/publicar_catalogo.py`).
+O caixa pega o preço novo em até 60 segundos sozinho, ou na hora se alguém clicar em
+"Atualizar catálogo" na tela dele.
+
+**Isto é best-effort:** o cadastro aqui no precifier é sempre gravado primeiro; se o Redis do
+PDV estiver fora do ar na hora de publicar, só o caixa fica desatualizado até a próxima
+gravação — nada se perde aqui. Se isso acontecer, a mensagem de sucesso do formulário avisa.
+
+**PLU ou código de barras repetido** em dois pratos: o segundo é ignorado na sincronização
+(mas continua salvo normalmente aqui) — a mensagem avisa quantos itens ficaram de fora.
+
+**Prato sem PLU/código de barras não é removido do caixa por engano.** Só produtos que já
+tinham um dos dois preenchidos são publicados/atualizados/removidos de lá.
