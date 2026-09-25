@@ -398,5 +398,24 @@ gravação — nada se perde aqui. Se isso acontecer, a mensagem de sucesso do f
 **PLU ou código de barras repetido** em dois pratos: o segundo é ignorado na sincronização
 (mas continua salvo normalmente aqui) — a mensagem avisa quantos itens ficaram de fora.
 
+### Importar preços da balança
+
+Em **Meus Pratos → "Importar preços da balança"**, escolha o arquivo de produtos exportado da
+balança (ex.: `Produtos.txt`, linhas no formato `1 0CANELONE CARNE   72,90   4D` — PLU,
+departamento + nome, preço, validade). O sistema mostra antes o que vai mudar e só grava depois
+de você confirmar. Para cada produto do arquivo:
+
+- **Prato com o mesmo PLU** → o preço de venda do prato é atualizado (e vai para o caixa).
+- **Prato ainda sem PLU com o mesmo nome** → o prato ganha o PLU e o preço. Se o nome aparece
+  mais de uma vez no arquivo (ex.: `LASANHA AO SUGO` resfriada e congelada), nada é adivinhado:
+  aparece um aviso para você preencher o PLU certo no prato.
+- **Sem prato correspondente** → o preço é gravado direto no catálogo do caixa no Redis
+  (`produto:{plu}` + `catalogo:snapshot` + `catalogo:versao`). Só o preço muda; nome e outros
+  campos que já estavam lá ficam como estão, e nada é apagado.
+- **Preço 0,00** → ignorado (nunca zera o preço de nada).
+
+Código: `src/lib/arquivoBalanca.ts` (leitura do arquivo), `src/app/actions/importarPrecos.ts`
+e `atualizarPrecosDiretoNoPdv` em `src/lib/pdv.ts`.
+
 **Prato sem PLU/código de barras não é removido do caixa por engano.** Só produtos que já
 tinham um dos dois preenchidos são publicados/atualizados/removidos de lá.
