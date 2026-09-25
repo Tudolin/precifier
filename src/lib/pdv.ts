@@ -248,3 +248,149 @@ export async function sincronizarComPdv(
     };
   }
 }
+
+// ---------------------------------------------------------------------
+// Precos vindos do arquivo da balanca, para PLUs que NENHUM prato usa
+// ---------------------------------------------------------------------
+
+export interface PrecoDiretoPdv {
+  plu: number;
+  nome: string;
+  preco: number;
+  /** Usada so quando o produto ainda nao existe no catalogo do caixa. */
+  categoria: string;
+}
+
+export interface MudancaDiretaPdv {
+  plu: number;
+  nome: string;
+  /** Preco que estava no catalogo do caixa; undefined = produto novo la. */
+  precoAntes?: number;
+  precoDepois: number;
+}
+
+export interface ResultadoPrecosDiretosPdv {
+  /** Redis nao configurado (modo local): nada foi lido nem gravado. */
+  pulou: boolean;
+  mudancas: MudancaDiretaPdv[];
+  iguais: number;
+  erro?: string;
+}
+
+/** Campos de preco que ja podem existir no documento: o do precifier
+ * (`precoVenda`) e os do publicar_catalogo.py (`preco_kg`/`preco_fixo`). */
+const CAMPOS_PRECO = ["precoVenda", "preco_kg", "preco_fixo"] as const;
+
+function precoDoDocumento(doc: DocumentoBruto | null | undefined): number | undefined {
+  if (!doc) return undefined;
+  for (const campo of CAMPOS_PRECO) {
+    const valor = Number(doc[campo]);
+    if (doc[campo] !== undefined && Number.isFinite(valor)) return valor;
+  }
+  return undefined;
+}
+
+/** Troca so o preco (em todo campo de preco que o documento ja tiver),
+ * preservando o resto -- o documento pode ter sido gravado pelo script
+ * Python, com campos que o precifier nao conhece. */
+function comPrecoNovo(doc: DocumentoBruto | null | undefined, item: PrecoDiretoPdv): DocumentoBruto {
+  if (!doc) {
+    return { nome: item.nome, precoVenda: item.preco, categoria: item.categoria, ativo: true };
+  }
+  const novo: DocumentoBruto = { ...doc };
+  let achouCampo = false;
+  for (const campo of CAMPOS_PRECO) {
+    if (novo[campo] !== undefined) {
+      novo[campo] = item.preco;
+      achouCampo = true;
+    }
+  }
+  if (!achouCampo) novo.precoVenda = item.preco;
+  if ("ativo" in novo) novo.ativo = true;
+  return novo;
+}
+
+/**
+ * Grava o preco direto em `produto:{plu}` (+ snapshot + versao) para
+ * produtos da balanca que nao tem prato no precifier.
+ *
+ * Diferente de `sincronizarComPdv`, aqui a fonte e o arquivo oficial da
+ * balanca que o dono escolheu importar, entao atualizar o preco de uma
+ * entrada publicada pelo script Python e exatamente o pedido. Mesmo assim:
+ *  - so o PRECO muda; nome/categoria/outros campos existentes ficam;
+ *  - nada e apagado;
+ *  - nada entra em `precifier:pdv_publicados` -- essas chaves continuam
+ *    "de origem externa" e `sincronizarComPdv` nunca vai remove-las.
+ *
+ * Com `aplicar = false` so le o catalogo e devolve o que mudaria.
+ */
+export async function atualizarPrecosDiretoNoPdv(
+  itens: PrecoDiretoPdv[],
+  aplicar: boolean
+): Promise<ResultadoPrecosDiretosPdv> {
+  const credenciais = credenciaisBanco();
+  if (!credenciais) return { pulou: true, mudancas: [], iguais: 0 };
+  if (itens.length === 0) return { pulou: false, mudancas: [], iguais: 0 };
+
+  try {
+    const { createClient } = await import("@vercel/kv");
+    const kv = createClient({ ...credenciais, cache: "no-store" });
+
+    const atuais = await kv.mget<(DocumentoBruto | null)[]>(
+      ...itens.map((item) => `${PREFIXO_PRODUTO}${item.plu}`)
+    );
+
+    const mudancas: MudancaDiretaPdv[] = [];
+    const novosDocs = new Map<number, DocumentoBruto>();
+    itens.forEach((item, i) => {
+      const precoAntes = precoDoDocumento(atuais[i]);
+      if (precoAntes !== undefined && Math.abs(precoAntes - item.preco) < 0.005) return;
+      mudancas.push({ plu: item.plu, nome: item.nome, precoAntes, precoDepois: item.preco });
+      novosDocs.set(item.plu, comPrecoNovo(atuais[i], item));
+    });
+
+    const iguais = itens.length - mudancas.length;
+    if (!aplicar || mudancas.length === 0) return { pulou: false, mudancas, iguais };
+
+    const escrita = kv.pipeline();
+    novosDocs.forEach((doc, plu) => escrita.set(`${PREFIXO_PRODUTO}${plu}`, doc));
+    await escrita.exec();
+
+    // Snapshot: mesma regra de sincronizarComPdv -- mescla, nunca substitui.
+    const snapshotAtual = await kv.get<{
+      produtos?: DocumentoBruto[];
+      eans?: DocumentoBruto[];
+    }>(CHAVE_SNAPSHOT);
+    const produtos = new Map<number, DocumentoBruto>();
+    for (const item of snapshotAtual?.produtos ?? []) {
+      const plu = Number(item.plu);
+      if (Number.isFinite(plu)) produtos.set(plu, item);
+    }
+    const itemPorPlu = new Map(itens.map((item) => [item.plu, item]));
+    novosDocs.forEach((doc, plu) => {
+      const noSnapshot = produtos.get(plu);
+      produtos.set(
+        plu,
+        noSnapshot ? comPrecoNovo(noSnapshot, itemPorPlu.get(plu) as PrecoDiretoPdv) : { plu, ...doc }
+      );
+    });
+
+    const novaVersao = ((await kv.get<number>(CHAVE_VERSAO)) || 0) + 1;
+    await kv.set(CHAVE_SNAPSHOT, {
+      versao: String(novaVersao),
+      produtos: Array.from(produtos.values()),
+      eans: snapshotAtual?.eans ?? [],
+    });
+    // Versao por ultimo: o PDV nunca ve versao nova com catalogo pela metade.
+    await kv.set(CHAVE_VERSAO, novaVersao);
+
+    return { pulou: false, mudancas, iguais };
+  } catch (erro) {
+    return {
+      pulou: false,
+      mudancas: [],
+      iguais: 0,
+      erro: erro instanceof Error ? erro.message : String(erro),
+    };
+  }
+}

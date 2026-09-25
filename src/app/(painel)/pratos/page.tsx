@@ -1,5 +1,6 @@
 import Link from "next/link";
 
+import ImportarPrecos from "@/components/ImportarPrecos";
 import LinkAjuda from "@/components/LinkAjuda";
 import PratosClient from "@/components/PratosClient";
 import {
@@ -37,6 +38,9 @@ export default async function PaginaPratos() {
           <LinkAjuda secao="rendimento">
             Como preencher o rendimento da receita
           </LinkAjuda>
+        </div>
+        <div className="mt-4">
+          <ImportarPrecos />
         </div>
       </div>
 
